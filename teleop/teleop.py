@@ -26,11 +26,28 @@ from base_utils.logger import Logger
 
 logger = Logger()
 
+# import vuer releated module
+from image_server.image_client import ImageClient
+from vuer_server import VuerServer
+from multiprocessing import shared_memory
 
 def scale_quat_to_euler(q, s):
     rotation = R.from_quat(q)
     rpy = rotation.as_euler("xzy", degrees=False)
     r, p, y = rpy
+    if r >= 0:
+        r_trans = math.pi - r
+    else:
+        r_trans = -math.pi - r
+    p_trans = -p
+    y_trans = y
+    rpy_trans = np.array([p_trans, -r_trans, y_trans])
+    rpy_scaled = rpy_trans * s
+
+    return rpy_scaled
+
+def scale_euler(euler, s):
+    r, p, y = (euler[0], euler[2], euler[1])
     if r >= 0:
         r_trans = math.pi - r
     else:
@@ -61,6 +78,8 @@ class TeleOp(object):
             self.init_pico_control()
         elif self.mode == "keyboard":
             self.init_keyboard_control()
+        elif self.mode == "vuer":
+            self.init_vuer_control()
         else:
             raise ValueError("Invalid mode")
         self.lock = threading.Lock()
@@ -80,6 +99,17 @@ class TeleOp(object):
             "rot": np.array([0.0, 0.0, 0.0]),
         }
         self.last_command = [default_cmd, default_cmd]
+
+    def init_vuer_control(self):
+        img_shape = (480, 640, 3)
+        img_shm = shared_memory.SharedMemory(create=True, size=np.prod(img_shape) * np.uint8().itemsize)
+        img_array = np.ndarray(img_shape, dtype=np.uint8, buffer=img_shm.buf)
+        img_client = ImageClient(tv_img_shape = img_shape, tv_img_shm_name = img_shm.name,
+                             server_address="127.0.0.1", port=6666)
+        image_receive_thread = threading.Thread(target=img_client.receive_process, daemon=True)
+        image_receive_thread.start()
+
+        self.vuer_server = VuerServer(False, img_shape, img_shm.name, host=self.host_ip, port=self.port)
 
     def reset_command(self):
         self.command_ = np.array([0.0, 0.0, 0.0])
@@ -284,10 +314,12 @@ class TeleOp(object):
         rescaled_pos_r = coef_pos * self.pico_command["r"]["position"]
         rescaled_rpy_l = scale_quat_to_euler(
             self.pico_command["l"]["quaternion"], coef_quat
-        )
+        ) if self.mode != 'vuer' else scale_euler(
+            self.pico_command["l"]["quaternion"][1:], coef_quat)
         rescaled_rpy_r = scale_quat_to_euler(
             self.pico_command["r"]["quaternion"], coef_quat
-        )
+        ) if self.mode != 'vuer' else scale_euler(
+            self.pico_command["r"]["quaternion"][1:], coef_quat)
         reset_l = self.pico_command["l"]["reset"]
         reset_r = self.pico_command["r"]["reset"]
 
@@ -367,6 +399,27 @@ class TeleOp(object):
         try:
             while True:
                 pico_cmd = self.vr_server.on_update()
+                if pico_cmd:
+                    self.parse_pico_command(pico_cmd)
+                    self.parse_arm_control(coef_pos, coef_quat)
+                    self.parse_gripper_control()
+                    self.parse_head_control()
+                    self.parse_waist_control()
+                    self.apply_base_control()
+                    self.env.robot.set_joint_pose(
+                        target_joint_position=self.init_pos, is_trajectory=with_physics
+                    )
+
+        except KeyboardInterrupt:
+            logger.warning("keyboard interrupt")
+
+    def run_vuer_control(self, with_physics=True):
+        self.initialize()
+        coef_pos = 1.0
+        coef_quat = 1.0
+        try:
+            while True:
+                pico_cmd = self.vuer_server.on_update()
                 if pico_cmd:
                     self.parse_pico_command(pico_cmd)
                     self.parse_arm_control(coef_pos, coef_quat)
@@ -502,6 +555,8 @@ class TeleOp(object):
                 self.run_pico_control()
             elif self.mode == "keyboard":
                 self.run_keyboard_control()
+            elif self.mode == "vuer":
+                self.run_vuer_control()
             else:
                 raise ValueError("Invalid mode: {}".format(self.mode))
 
@@ -516,7 +571,7 @@ def main():
     parser.add_argument("--client_host", type=str, default="localhost:50051", help="The client")
     parser.add_argument("--fps", type=int, default=30, help="Set fps of the recording")
     parser.add_argument("--task_name", default="genie_task_supermarket", type=str, help="Selected task to run")
-    parser.add_argument("--mode", type=str, default="pico", help="Choose teleop mode: pico or keyboard")
+    parser.add_argument("--mode", type=str, default="pico", help="Choose teleop mode: pico or keyboard or vuer")
     parser.add_argument("--record", action="store_true", help="Enable data recording")
     parser.add_argument("--host_ip", type=str, default="192.168.111.177", help="Set vr host ip")
     parser.add_argument("--port", type=int, default=8080, help="Set vr port")
