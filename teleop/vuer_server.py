@@ -62,7 +62,6 @@ class VuerServer:
 
     async def on_pico_user_defined_event(self, event, session, fps=60):
         try:
-            print(event.value)
             self.pico_json_que.put(event.value, block=False)
         except:
             pass
