@@ -1,7 +1,7 @@
 import time
 from vuer import Vuer
 from vuer.schemas import ImageBackground, Hands
-from multiprocessing import Array, Process, shared_memory, Queue
+from multiprocessing import Array, Process, shared_memory, Queue, Lock
 import numpy as np
 import asyncio
 import cv2
@@ -50,6 +50,7 @@ class VuerServer:
         self.aspect_shared = Value('d', 1.0, lock=True)
 
         self.pico_json_que = Queue(1)
+        self.pico_json_lock = Lock()
         self.counter = 0
 
         self.process = Process(target=self.vuer_run)
@@ -61,10 +62,16 @@ class VuerServer:
         self.vuer.run()
 
     async def on_pico_user_defined_event(self, event, session, fps=60):
-        try:
-            self.pico_json_que.put(event.value, block=False)
-        except:
-            pass
+        with self.pico_json_lock:
+            try:
+                self.pico_json_que.put_nowait(event.value)
+            except:
+                try:
+                    self.pico_json_que.get_nowait()
+                    self.pico_json_que.put_nowait(event.value)
+                except:
+                    logger.info("update pico pose fail.")
+                    pass
 
     async def on_cam_move(self, event, session, fps=60):
         try:
@@ -144,7 +151,7 @@ class VuerServer:
 
     def on_update(self):
         try:
-            pico_value = self.pico_json_que.get(block=False)
+            pico_value = self.pico_json_que.get_nowait()
             return pico_value
         except:
             pass
